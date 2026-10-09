@@ -308,11 +308,31 @@ function App() {
   const [sortKey, setSortKey] = useState('views');
   const [sortDirection, setSortDirection] = useState('desc');
   const toolRef = useRef(null);
+  const [toolInView, setToolInView] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
     localStorage.setItem('viewly-theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
+
+  useEffect(() => {
+    const node = toolRef.current;
+    if (!node || !('IntersectionObserver' in window)) {
+      setToolInView(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setToolInView(true);
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.12 }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -439,7 +459,7 @@ function App() {
           <div className="max-w-5xl">
             <div className="relative h-[120px] sm:h-[180px]">
               <div className="absolute inset-0 flex items-center justify-center">
-                <h1 className="greeting text-balance leading-[0.92] tracking-[-0.06em] text-[color:var(--text)]">
+                <h1 key={greetingIndex} className="greeting greeting-swap text-balance leading-[0.92] tracking-[-0.06em] text-[color:var(--text)]">
                   {greetingLines[greetingIndex]}
                 </h1>
               </div>
@@ -460,7 +480,7 @@ function App() {
           </div>
         </section>
 
-        <section ref={toolRef} className="px-6 pb-24 pt-16 sm:px-10 lg:px-20">
+        <section ref={toolRef} className={`tool-section px-6 pb-24 pt-16 sm:px-10 lg:px-20${toolInView ? ' is-visible' : ''}`}>
           <div className="mx-auto max-w-7xl">
             <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div>

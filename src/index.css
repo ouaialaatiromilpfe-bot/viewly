@@ -162,6 +162,26 @@ button {
 }
 
 /* ---------- Motion ---------- */
+.greeting-swap {
+  animation: greeting-crossfade 1.1s ease both;
+}
+
+@keyframes greeting-crossfade {
+  from { opacity: 0; filter: blur(6px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+.tool-section > * {
+  opacity: 0;
+  transform: translate3d(0, 28px, 0);
+  transition: opacity 0.9s ease, transform 0.9s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.tool-section.is-visible > * {
+  opacity: 1;
+  transform: none;
+}
+
 .animate-fade-in {
   animation: fade-up 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
@@ -186,6 +206,8 @@ button {
   .blob {
     animation-duration: 180s !important;
   }
+  .greeting-swap,
+  .tool-section > *,
   .animate-fade-in,
   .reveal {
     animation: none !important;
