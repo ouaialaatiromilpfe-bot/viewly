@@ -20,20 +20,33 @@ const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const shortCheckCache = new Map();
 const apiCache = new Map();
 
+// Limit concurrent Shorts checks to 5 requests at once.
+let shortsCheckInProgress = 0;
+const MAX_CONCURRENT_SHORTS_CHECKS = 5;
+const shortsCheckQueue = [];
+
 app.use(express.json({ limit: '2mb' }));
 
-const cacheKey = (label, params = {}) => {
-  return `${label}:${JSON.stringify(params)}`;
-};
-
+const cacheKey = (label, params = {}) => `${label}:${JSON.stringify(params)}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const readJson = async (url) => {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`YouTube API request failed with status ${response.status}`);
+const waitForShortsCheckSlot = () => new Promise((resolve) => {
+  if (shortsCheckInProgress < MAX_CONCURRENT_SHORTS_CHECKS) {
+    shortsCheckInProgress += 1;
+    resolve();
+    return;
   }
-  return response.json();
+
+  shortsCheckQueue.push(resolve);
+});
+
+const releaseShortsCheckSlot = () => {
+  shortsCheckInProgress -= 1;
+  const next = shortsCheckQueue.shift();
+  if (next) {
+    shortsCheckInProgress += 1;
+    next();
+  }
 };
 
 const youtubeRequest = async (endpoint, params = {}) => {
@@ -49,7 +62,6 @@ const youtubeRequest = async (endpoint, params = {}) => {
       url.searchParams.set(name, value);
     }
   });
-
   url.searchParams.set('key', YOUTUBE_API_KEY);
 
   const response = await fetch(url, {
@@ -61,7 +73,6 @@ const youtubeRequest = async (endpoint, params = {}) => {
   }
 
   const payload = await response.json();
-
   apiCache.set(key, {
     value: payload,
     expiresAt: Date.now() + 1000 * 60 * 5,
@@ -71,9 +82,7 @@ const youtubeRequest = async (endpoint, params = {}) => {
 };
 
 const parseChannelReference = (input) => {
-  if (!input || !input.trim()) {
-    return null;
-  }
+  if (!input || !input.trim()) return null;
 
   const value = input.trim();
   if (/^@\w/.test(value)) return { type: 'handle', value: value.slice(1) };
@@ -88,25 +97,11 @@ const parseChannelReference = (input) => {
     }
 
     const parts = url.pathname.split('/').filter(Boolean);
-    if (parts[0]?.startsWith('@')) {
-      return { type: 'handle', value: parts[0].slice(1) };
-    }
-
-    if (parts[0] === 'channel' && parts[1]) {
-      return { type: 'channelId', value: parts[1] };
-    }
-
-    if (parts[0] === 'user' && parts[1]) {
-      return { type: 'username', value: parts[1] };
-    }
-
-    if (parts[0] === 'c' && parts[1]) {
-      return { type: 'custom', value: parts[1] };
-    }
-
-    if (parts[0] && /^UC/.test(parts[0])) {
-      return { type: 'channelId', value: parts[0] };
-    }
+    if (parts[0]?.startsWith('@')) return { type: 'handle', value: parts[0].slice(1) };
+    if (parts[0] === 'channel' && parts[1]) return { type: 'channelId', value: parts[1] };
+    if (parts[0] === 'user' && parts[1]) return { type: 'username', value: parts[1] };
+    if (parts[0] === 'c' && parts[1]) return { type: 'custom', value: parts[1] };
+    if (parts[0] && /^UC/.test(parts[0])) return { type: 'channelId', value: parts[0] };
   } catch {
     return null;
   }
@@ -116,9 +111,7 @@ const parseChannelReference = (input) => {
 
 const getChannelMeta = async (channelUrl) => {
   const ref = parseChannelReference(channelUrl);
-  if (!ref) {
-    throw new Error('Invalid YouTube channel URL.');
-  }
+  if (!ref) throw new Error('Invalid YouTube channel URL.');
 
   let channelData = null;
 
@@ -149,9 +142,7 @@ const getChannelMeta = async (channelUrl) => {
     });
 
     const item = searchResult?.items?.find((entry) => entry?.snippet?.channelId);
-    if (!item) {
-      throw new Error('Channel not found.');
-    }
+    if (!item) throw new Error('Channel not found.');
 
     channelData = await youtubeRequest('channels', {
       part: 'id,snippet,statistics',
@@ -161,9 +152,7 @@ const getChannelMeta = async (channelUrl) => {
   }
 
   const channel = channelData?.items?.[0];
-  if (!channel?.id) {
-    throw new Error('Channel not found.');
-  }
+  if (!channel?.id) throw new Error('Channel not found.');
 
   return {
     id: channel.id,
@@ -173,36 +162,34 @@ const getChannelMeta = async (channelUrl) => {
   };
 };
 
-const isShortVideo = async (videoId) => {
-  if (shortCheckCache.has(videoId)) {
-    return shortCheckCache.get(videoId);
-  }
+const parseDuration = (isoDuration) => {
+  if (!isoDuration) return 0;
+  const match = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i.exec(isoDuration);
+  if (!match) return 0;
 
-  const url = `https://www.youtube.com/shorts/${videoId}`;
-  let lastError = null;
+  const days = Number(match[1] || 0);
+  const hours = Number(match[2] || 0);
+  const minutes = Number(match[3] || 0);
+  const seconds = Number(match[4] || 0);
+  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
+};
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      const response = await fetch(url, {
-        method: 'HEAD',
-        redirect: 'manual',
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+const normalizeVideo = (video) => {
+  const snippet = video?.snippet || {};
+  const stats = video?.statistics || {};
+  const details = video?.contentDetails || {};
 
-      const isShort = response.status === 200;
-      shortCheckCache.set(videoId, isShort);
-      return isShort;
-    } catch (error) {
-      lastError = error;
-      await sleep(250);
-    }
-  }
-
-  shortCheckCache.set(videoId, false);
-  return false;
+  return {
+    id: video?.id,
+    title: snippet.title || 'Untitled video',
+    thumbnail: snippet.thumbnails?.medium?.url || snippet.thumbnails?.default?.url || '',
+    url: `https://www.youtube.com/watch?v=${video?.id}`,
+    publishedAt: snippet.publishedAt || null,
+    durationSeconds: details.duration ? parseDuration(details.duration) : 0,
+    views: Number(stats.viewCount || 0),
+    liveStreamingDetails: video?.liveStreamingDetails || null,
+    liveBroadcastContent: snippet.liveBroadcastContent || 'none',
+  };
 };
 
 const fetchPlaylistVideos = async ({ channelId, startDate, endDate, maxVideos, playlistType = 'UULF' }) => {
@@ -238,180 +225,89 @@ const fetchPlaylistVideos = async ({ channelId, startDate, endDate, maxVideos, p
         continue;
       }
 
-      collected.push({
-        id: videoId,
-        publishedAt,
-      });
+      collected.push({ id: videoId, publishedAt });
 
-      if (maxVideos && maxVideos !== 'all' && collected.length >= Number(maxVideos) + 25) {
+      if (maxVideos && maxVideos !== 'all' && collected.length >= Number(maxVideos)) {
         stopped = true;
         break;
       }
     }
 
-    if (!response.nextPageToken || stopped) {
-      break;
-    }
-
+    if (!response.nextPageToken || stopped) break;
     nextPageToken = response.nextPageToken;
   }
 
   return collected;
 };
 
-const normalizeVideo = (video) => {
-  const snippet = video?.snippet || {};
-  const stats = video?.statistics || {};
-  const details = video?.contentDetails || {};
+const isShortVideo = async (videoId) => {
+  if (shortCheckCache.has(videoId)) return shortCheckCache.get(videoId);
 
-  return {
-    id: video?.id,
-    title: snippet.title || 'Untitled video',
-    thumbnail: snippet.thumbnails?.medium?.url || snippet.thumbnails?.default?.url || '',
-    url: `https://www.youtube.com/watch?v=${video?.id}`,
-    publishedAt: snippet.publishedAt || null,
-    durationSeconds: details.duration ? parseDuration(details.duration) : 0,
-    views: Number(stats.viewCount || 0),
-    liveStreamingDetails: video?.liveStreamingDetails || null,
-    liveBroadcastContent: snippet.liveBroadcastContent || 'none',
-  };
+  await waitForShortsCheckSlot();
+
+  try {
+    const url = `https://www.youtube.com/shorts/${videoId}`;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+
+        const response = await fetch(url, {
+          method: 'HEAD',
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        const isShort = response.status === 200;
+        shortCheckCache.set(videoId, isShort);
+        return isShort;
+      } catch {
+        if (attempt < 1) await sleep(250);
+      }
+    }
+
+    shortCheckCache.set(videoId, false);
+    return false;
+  } finally {
+    releaseShortsCheckSlot();
+  }
 };
 
-const parseDuration = (isoDuration) => {
-  if (!isoDuration) return 0;
-  const match = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i.exec(isoDuration);
-  if (!match) return 0;
-  const days = Number(match[1] || 0);
-  const hours = Number(match[2] || 0);
-  const minutes = Number(match[3] || 0);
-  const seconds = Number(match[4] || 0);
-  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
-};
+const filterRegularLongFormVideos = async (videos, startDate, endDate) => {
+  const startMs = new Date(startDate).getTime();
+  const endMs = new Date(endDate).getTime();
 
-const analyzeChannel = async ({ channelUrl, maxVideos, period }) => {
-  const channel = await getChannelMeta(channelUrl);
-  const startMs = new Date(period.start).getTime();
-  const endMs = new Date(period.end).getTime();
-  const limit = maxVideos === 'all' ? null : Number(maxVideos);
-
-  let candidateIds = [];
-  let skippedCount = 0;
-
-  const candidateList = await fetchPlaylistVideos({
-    channelId: channel.id,
-    startDate: period.start,
-    endDate: period.end,
-    maxVideos: limit,
-    playlistType: 'UULF',
-  });
-
-  candidateIds = candidateList.map((item) => item.id);
-
-  if (candidateIds.length === 0) {
-    const fallback = await fetchPlaylistVideos({
-      channelId: channel.id,
-      startDate: period.start,
-      endDate: period.end,
-      maxVideos: limit,
-      playlistType: 'UU',
-    });
-
-    candidateIds = fallback.map((item) => item.id);
-  }
-
-  if (candidateIds.length === 0) {
-    return {
-      channel,
-      period: {
-        label: period.label || 'Selection',
-        start: period.start,
-        end: period.end,
-      },
-      skippedCount: 0,
-      videos: [],
-      videoCount: 0,
-      stats: {
-        average: 0,
-        median: 0,
-        minimum: 0,
-      },
-      top5: [],
-      bottom5: [],
-      minVideo: null,
-    };
-  }
-
-  const uniqueIds = [...new Set(candidateIds)];
-  const videoDetails = [];
-  for (let index = 0; index < uniqueIds.length; index += 50) {
-    const batch = uniqueIds.slice(index, index + 50);
-    const detailResponse = await youtubeRequest('videos', {
-      part: 'snippet,statistics,contentDetails,liveStreamingDetails',
-      id: batch.join(','),
-    });
-
-    videoDetails.push(...(detailResponse?.items || []));
-  }
-
-  const normalized = videoDetails.map(normalizeVideo);
   const kept = [];
+  let skippedShorts = 0;
+  let skippedLiveStreams = 0;
 
-  for (const video of normalized) {
+  for (const video of videos) {
     if (!video.publishedAt) continue;
+
     const publishedTime = new Date(video.publishedAt).getTime();
     if (publishedTime < startMs || publishedTime > endMs) continue;
 
+    // Exclude any video that has liveStreamingDetails OR is not a normal video broadcast.
     if (video.liveStreamingDetails || video.liveBroadcastContent !== 'none') {
-      skippedCount += 1;
+      skippedLiveStreams += 1;
       continue;
     }
 
-    const isShort = await isShortVideo(video.id);
-    if (isShort) {
-      skippedCount += 1;
-      continue;
+    // Exclude Shorts for videos <= 3 minutes.
+    if (video.durationSeconds <= 180) {
+      const isShort = await isShortVideo(video.id);
+      if (isShort) {
+        skippedShorts += 1;
+        continue;
+      }
     }
 
-    if (video.durationSeconds <= 180 && !isShort) {
-      kept.push(video);
-      continue;
-    }
-
-    if (video.durationSeconds > 180) {
-      kept.push(video);
-    }
+    kept.push(video);
   }
 
-  const sorted = [...kept].sort((a, b) => b.views - a.views);
-  const stats = sorted.length ? computeStats(sorted) : { average: 0, median: 0, minimum: 0 };
-  const top5 = sorted.slice(0, 5);
-  const bottom5 = [...sorted].sort((a, b) => a.views - b.views).slice(0, 5);
-  const minVideo = [...sorted].sort((a, b) => a.views - b.views)[0] || null;
-
-  return {
-    channel,
-    period: {
-      label: period.label || 'Selection',
-      start: period.start,
-      end: period.end,
-    },
-    videoCount: sorted.length,
-    skippedCount,
-    stats,
-    videos: sorted,
-    top5,
-    bottom5,
-    minVideo: minVideo
-      ? {
-          id: minVideo.id,
-          title: minVideo.title,
-          thumbnail: minVideo.thumbnail,
-          url: minVideo.url,
-          publishedAt: minVideo.publishedAt,
-          views: minVideo.views,
-        }
-      : null,
-  };
+  return { filtered: kept, skippedShorts, skippedLiveStreams };
 };
 
 const computeStats = (videos) => {
@@ -428,8 +324,96 @@ const computeStats = (videos) => {
   }
 
   const minimum = values.length ? values[0] : 0;
-
   return { average, median, minimum };
+};
+
+const analyzeChannel = async ({ channelUrl, maxVideos, period }) => {
+  const channel = await getChannelMeta(channelUrl);
+  const limit = maxVideos === 'all' ? null : Number(maxVideos);
+
+  let candidateList = await fetchPlaylistVideos({
+    channelId: channel.id,
+    startDate: period.start,
+    endDate: period.end,
+    maxVideos: limit,
+    playlistType: 'UULF',
+  });
+
+  if (candidateList.length === 0) {
+    candidateList = await fetchPlaylistVideos({
+      channelId: channel.id,
+      startDate: period.start,
+      endDate: period.end,
+      maxVideos: limit,
+      playlistType: 'UU',
+    });
+  }
+
+  if (candidateList.length === 0) {
+    return {
+      channel,
+      period: { label: period.label || 'Selection', start: period.start, end: period.end },
+      videoCount: 0,
+      skippedCount: 0,
+      skippedShorts: 0,
+      skippedLiveStreams: 0,
+      stats: { average: 0, median: 0, minimum: 0 },
+      videos: [],
+      top5: [],
+      bottom5: [],
+      minVideo: null,
+    };
+  }
+
+  const uniqueIds = [...new Set(candidateList.map((item) => item.id))];
+  const videoDetails = [];
+
+  for (let index = 0; index < uniqueIds.length; index += 50) {
+    const batch = uniqueIds.slice(index, index + 50);
+    const detailResponse = await youtubeRequest('videos', {
+      part: 'snippet,statistics,contentDetails,liveStreamingDetails',
+      id: batch.join(','),
+    });
+
+    videoDetails.push(...(detailResponse?.items || []));
+  }
+
+  const normalized = videoDetails.map(normalizeVideo);
+  const { filtered, skippedShorts, skippedLiveStreams } = await filterRegularLongFormVideos(
+    normalized,
+    period.start,
+    period.end
+  );
+
+  const sorted = [...filtered].sort((a, b) => b.views - a.views);
+  const stats = sorted.length ? computeStats(sorted) : { average: 0, median: 0, minimum: 0 };
+
+  const top5 = sorted.slice(0, 5);
+  const remainingLowest = [...sorted].sort((a, b) => a.views - b.views);
+  const bottom5 = remainingLowest.slice(0, 5);
+
+  const minVideo = [...sorted].sort((a, b) => a.views - b.views)[0] || null;
+
+  return {
+    channel,
+    period: { label: period.label || 'Selection', start: period.start, end: period.end },
+    videoCount: sorted.length,
+    skippedCount: skippedShorts + skippedLiveStreams,
+    skippedShorts,
+    skippedLiveStreams,
+    stats,
+    videos: sorted,
+    top5,
+    bottom5,
+    minVideo: minVideo ? {
+      id: minVideo.id,
+      title: minVideo.title,
+      thumbnail: minVideo.thumbnail,
+      url: minVideo.url,
+      publishedAt: minVideo.publishedAt,
+      views: minVideo.views,
+    } : null,
+  };
 };
 
 app.post('/api/analyze', async (req, res) => {
@@ -444,13 +428,8 @@ app.post('/api/analyze', async (req, res) => {
       return res.status(400).json({ error: 'A valid period is required.' });
     }
 
-    const result = await analyzeChannel({
-      channelUrl,
-      maxVideos,
-      period,
-    });
-
-    res.json(result);
+    const result = await analyzeChannel({ channelUrl, maxVideos, period });
+    return res.json(result);
   } catch (error) {
     const message = error?.message || 'There was a problem analyzing the channel.';
 
@@ -469,10 +448,7 @@ app.post('/api/analyze', async (req, res) => {
 app.use(express.static(distPath));
 
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/')) {
-    return next();
-  }
-
+  if (req.path.startsWith('/api/')) return next();
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
