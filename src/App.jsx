@@ -259,6 +259,32 @@ const getAnimatedCountValue = (value) => {
   return value;
 };
 
+function useCountUp(target, duration = 1400) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    const end = Number.isFinite(target) ? target : 0;
+    let frame;
+    const start = performance.now();
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { setValue(end); return undefined; }
+    setValue(0);
+    const tick = (now) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setValue(end * eased);
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target, duration]);
+  return value;
+}
+
+function StatValue({ value }) {
+  const animated = useCountUp(Number(value) || 0);
+  return <div className="stat-value">{formatNumber(animated)}</div>;
+}
+
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const stored = localStorage.getItem('viewly-theme');
@@ -282,11 +308,31 @@ function App() {
   const [sortKey, setSortKey] = useState('views');
   const [sortDirection, setSortDirection] = useState('desc');
   const toolRef = useRef(null);
+  const [toolInView, setToolInView] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
     localStorage.setItem('viewly-theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
+
+  useEffect(() => {
+    const node = toolRef.current;
+    if (!node || !('IntersectionObserver' in window)) {
+      setToolInView(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setToolInView(true);
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.12 }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -388,7 +434,13 @@ function App() {
 
   return (
     <div className="min-h-screen text-[color:var(--text)] selection:bg-[rgba(41,22,49,0.16)]">
-      <div className="aurora" aria-hidden="true" />
+      <div className="aurora" aria-hidden="true">
+        <div className="blob blob-1" />
+        <div className="blob blob-2" />
+        <div className="blob blob-3" />
+        <div className="blob blob-4" />
+        <div className="blob blob-5" />
+      </div>
 
       <header className="fixed inset-x-0 top-0 z-40 flex items-center justify-between px-6 py-5 sm:px-10">
         <div className="text-xl font-semibold tracking-[0.08em] uppercase">Viewly</div>
@@ -407,7 +459,7 @@ function App() {
           <div className="max-w-5xl">
             <div className="relative h-[120px] sm:h-[180px]">
               <div className="absolute inset-0 flex items-center justify-center">
-                <h1 className="greeting text-balance leading-[0.92] tracking-[-0.06em] text-[color:var(--text)]">
+                <h1 key={greetingIndex} className="greeting greeting-swap text-balance leading-[0.92] tracking-[-0.06em] text-[color:var(--text)]">
                   {greetingLines[greetingIndex]}
                 </h1>
               </div>
@@ -428,7 +480,7 @@ function App() {
           </div>
         </section>
 
-        <section ref={toolRef} className="px-6 pb-24 pt-16 sm:px-10 lg:px-20">
+        <section ref={toolRef} className={`tool-section px-6 pb-24 pt-16 sm:px-10 lg:px-20${toolInView ? ' is-visible' : ''}`}>
           <div className="mx-auto max-w-7xl">
             <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div>
@@ -591,17 +643,17 @@ function App() {
                 <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
                   <div className="stat-block">
                     <div className="stat-label">Average views</div>
-                    <div className="stat-value" data-value={Math.round(average)}>{formatNumber(getAnimatedCountValue(average))}</div>
+                    <StatValue value={Math.round(average)} />
                   </div>
 
                   <div className="stat-block">
                     <div className="stat-label">Median views</div>
-                    <div className="stat-value" data-value={Math.round(median)}>{formatNumber(getAnimatedCountValue(median))}</div>
+                    <StatValue value={Math.round(median)} />
                   </div>
 
                   <div className="stat-block">
                     <div className="stat-label">Minimum views</div>
-                    <div className="stat-value" data-value={analysis.stats?.minimum || 0}>{formatNumber(getAnimatedCountValue(analysis.stats?.minimum || 0))}</div>
+                    <StatValue value={analysis.stats?.minimum || 0} />
                     {minVideo && (
                       <div className="mt-3 flex items-center gap-3 text-left">
                         <img src={minVideo.thumbnail} alt={minVideo.title} className="h-12 w-20 rounded-lg object-cover" />
@@ -617,7 +669,7 @@ function App() {
 
                   <div className="stat-block">
                     <div className="stat-label">Videos counted</div>
-                    <div className="stat-value" data-value={analysis.videoCount || 0}>{analysis.videoCount || 0}</div>
+                    <StatValue value={analysis.videoCount || 0} />
                     <div className="mt-3 text-sm text-[color:var(--muted)]">
                       {analysis.skippedCount || 0} skipped (Shorts / streams)
                     </div>
