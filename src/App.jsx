@@ -259,6 +259,32 @@ const getAnimatedCountValue = (value) => {
   return value;
 };
 
+function useCountUp(target, duration = 1400) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    const end = Number.isFinite(target) ? target : 0;
+    let frame;
+    const start = performance.now();
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { setValue(end); return undefined; }
+    setValue(0);
+    const tick = (now) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setValue(end * eased);
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target, duration]);
+  return value;
+}
+
+function StatValue({ value }) {
+  const animated = useCountUp(Number(value) || 0);
+  return <div className="stat-value">{formatNumber(animated)}</div>;
+}
+
 function App() {
   const [darkMode, setDarkMode] = useState(() => {
     const stored = localStorage.getItem('viewly-theme');
@@ -388,7 +414,13 @@ function App() {
 
   return (
     <div className="min-h-screen text-[color:var(--text)] selection:bg-[rgba(41,22,49,0.16)]">
-      <div className="aurora" aria-hidden="true" />
+      <div className="aurora" aria-hidden="true">
+        <div className="blob blob-1" />
+        <div className="blob blob-2" />
+        <div className="blob blob-3" />
+        <div className="blob blob-4" />
+        <div className="blob blob-5" />
+      </div>
 
       <header className="fixed inset-x-0 top-0 z-40 flex items-center justify-between px-6 py-5 sm:px-10">
         <div className="text-xl font-semibold tracking-[0.08em] uppercase">Viewly</div>
@@ -591,17 +623,17 @@ function App() {
                 <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
                   <div className="stat-block">
                     <div className="stat-label">Average views</div>
-                    <div className="stat-value" data-value={Math.round(average)}>{formatNumber(getAnimatedCountValue(average))}</div>
+                    <StatValue value={Math.round(average)} />
                   </div>
 
                   <div className="stat-block">
                     <div className="stat-label">Median views</div>
-                    <div className="stat-value" data-value={Math.round(median)}>{formatNumber(getAnimatedCountValue(median))}</div>
+                    <StatValue value={Math.round(median)} />
                   </div>
 
                   <div className="stat-block">
                     <div className="stat-label">Minimum views</div>
-                    <div className="stat-value" data-value={analysis.stats?.minimum || 0}>{formatNumber(getAnimatedCountValue(analysis.stats?.minimum || 0))}</div>
+                    <StatValue value={analysis.stats?.minimum || 0} />
                     {minVideo && (
                       <div className="mt-3 flex items-center gap-3 text-left">
                         <img src={minVideo.thumbnail} alt={minVideo.title} className="h-12 w-20 rounded-lg object-cover" />
@@ -617,7 +649,7 @@ function App() {
 
                   <div className="stat-block">
                     <div className="stat-label">Videos counted</div>
-                    <div className="stat-value" data-value={analysis.videoCount || 0}>{analysis.videoCount || 0}</div>
+                    <StatValue value={analysis.videoCount || 0} />
                     <div className="mt-3 text-sm text-[color:var(--muted)]">
                       {analysis.skippedCount || 0} skipped (Shorts / streams)
                     </div>
